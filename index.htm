@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="de">
+
+<head>
+  <meta charset="UTF-8">
+  <title>Config-Decoder</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
+  <style>
+    body {
+      margin: 20px;
+    }
+
+    .category-header {
+      background-color: #dee2e6;
+      font-weight: bold;
+    }
+
+    .export-buttons {
+      margin-top: 1rem;
+    }
+  </style>
+</head>
+
+<body>
+
+  <div class="container">
+    <h2 class="mb-4">Upload standard configuration file</h2>
+    <div class="mb-3">
+      <input type="file" class="form-control" id="fileInput">
+    </div>
+    <button class="btn btn-primary" onclick="analyzeConfig()">Analyze File</button>
+
+    <div id="resultSection" class="mt-5" style="display:none;">
+      <p><strong>Device:</strong> <span id="deviceType">?</span></p>
+      <div class="export-buttons">
+        <button class="btn btn-outline-secondary me-2" onclick="exportCSV()">Export CSV</button>
+        <button class="btn btn-outline-secondary" onclick="exportJSON()">Export JSON</button>
+        <p>
+      </div>
+      <input type="text" id="searchInput" class="form-control mb-3" placeholder="Search for objects..."
+        oninput="filterTable()">
+
+      <div class="table-responsive">
+        <table class="table table-bordered table-striped" id="passwordTable">
+          <thead class="table-light">
+            <tr>
+              <th>Category</th>
+              <th>Object</th>
+              <th>Value</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+
+    </div>
+  </div>
+
+  <script>
+    function makeKey(user, password) {
+      function pad(str) {
+        const buf = new Uint8Array(16);
+        for (let i = 0; i < Math.min(str.length, 16); i++) {
+          buf[i] = str.charCodeAt(i);
+        }
+        return buf;
+      }
+      const userPad = pad(user);
+      const passPad = pad(password);
+      const fullKey = new Uint8Array(32);
+      fullKey.set(userPad, 0);
+      fullKey.set(passPad, 16);
+      return CryptoJS.lib.WordArray.create(fullKey);
+    }
+
+    function makePBXKey(pwd) {
+      const buf = new Uint8Array(16);
+      for (let i = 0; i < Math.min(pwd.length, 16); i++) {
+        buf[i] = pwd.charCodeAt(i);
+      }
+      return CryptoJS.lib.WordArray.create(buf);
+    }
+
+    function rc4DecryptHex(hexString, keyWordArray) {
+      if (/^0+$/.test(hexString)) return "(empty / Dummy)";
+      try {
+        const ciphertext = CryptoJS.enc.Hex.parse(hexString);
+        const decrypted = CryptoJS.RC4.decrypt({ ciphertext }, keyWordArray);
+        const plain = CryptoJS.enc.Latin1.stringify(decrypted);
+        return plain && /[\x20-\x7E]/.test(plain) ? plain : "(unreadable)";
+      } catch (e) {
+        return "(Cant decrypt this file)";
+      }
+    }
+
+    function filterTable() {
+      const query = document.getElementById('searchInput').value.toLowerCase();
+      const rows = document.querySelectorAll('#passwordTable tbody tr');
+      rows.forEach(row => {
+        const text = row.textContent.toLowerCase();
+        row.style.display = text.includes(query) ? '' : 'none';
+      });
+    }
+
+    function exportCSV() {
+      const rows = [...document.querySelectorAll("#passwordTable tbody tr")];
+      let csv = "Category,Object,Value\n";
+      rows.forEach(row => {
+        const cols = row.querySelectorAll("td");
+        if (cols.length === 3)
+          csv += `"${cols[0].textContent}","${cols[1].textContent}","${cols[2].textContent}"\n`;
+      });
+
+      const blob = new Blob([csv], { type: "text/csv" });
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = "config_export.csv";
+      link.click();
+    }
+
+    function exportJSON() {
+      const rows = [...document.querySelectorAll("#passwordTable tbody tr")];
+      const data = [];
+      rows.forEach(row => {
+        const cols = row.querySelectorAll("td");
+        if (cols.length === 3)
+          data.push({
+            Category: cols[0].textContent,
+            Object: cols[1].textContent,
+            Value: cols[2].textContent
+          });
+      });
+
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = "config_export.json";
+      link.click();
+    }
+
+    function analyzeConfig() {
+      const fileInput = document.getElementById('fileInput');
+      const file = fileInput.files[0];
+      if (!file) return alert("Please select a file to analyze.");
+
+      const reader = new FileReader();
+      reader.onload = function (e) {
+        const text = e.target.result;
+        const lines = text.split('\n');
+        const tbody = document.querySelector("#passwordTable tbody");
+        tbody.innerHTML = '';
+
+        const devMatch = (lines[1] || '').match(/#\s([0-9]{2}r[0-9])\s\w+\s(IP\w{2,8})/);
+        const deviceType = devMatch ? devMatch[2].toLowerCase() : 'unbekannt';
+        document.getElementById('deviceType').textContent = deviceType;
+
+        const pbxPwMatch = text.match(/vars create PBX0\/PWD\s+pc\s+([a-fA-F0-9]+)/);
+        const keyMatch = text.match(/key="([a-fA-F0-9]{32})"/);
+        const varsRegex = /vars create (.*?)\s+pc\s+([a-fA-F0-9]+)/g;
+
+        if (!pbxPwMatch || !keyMatch) return alert("PBX0/PWD or key not found.");
+
+        const pbxPwHex = pbxPwMatch[1];
+        const keyHex = keyMatch[1];
+
+        const key1 = makeKey("admin", deviceType);
+        const pbxPw = rc4DecryptHex(pbxPwHex, key1);
+        const key2 = makePBXKey(pbxPw);
+        const pbxKey = rc4DecryptHex(keyHex, key2);
+        const userPwKey = makePBXKey(pbxKey);
+
+        const addRow = (k, o, v) => {
+          const row = document.createElement("tr");
+          row.innerHTML = `<td>${k}</td><td>${o}</td><td>${v}</td>`;
+          tbody.appendChild(row);
+        };
+
+        addRow("System", "PBX0/PWD", pbxPw);
+        addRow("System", "PBX-Key", pbxKey);
+
+        let match;
+        while ((match = varsRegex.exec(text)) !== null) {
+          const varName = match[1];
+          const varHex = match[2];
+          if (varName === "PBX0/PWD") continue;
+          const varPw = rc4DecryptHex(varHex, key1);
+          addRow("VARS", varName, varPw);
+        }
+
+        // user blocks
+        const userBlocks = [];
+        let currentUser = null;
+        let currentBlock = '';
+
+        for (const line of lines) {
+          const cnMatch = line.match(/\(cn=([^\)]+)\)/);
+          if (cnMatch) {
+            if (currentUser && currentBlock) {
+              userBlocks.push({ user: currentUser, block: currentBlock });
+            }
+            currentUser = cnMatch[1];
+            currentBlock = line;
+          } else if (currentUser) {
+            currentBlock += '\n' + line;
+          }
+        }
+        if (currentUser && currentBlock) {
+          userBlocks.push({ user: currentUser, block: currentBlock });
+        }
+
+        for (const { user, block } of userBlocks) {
+          const pwdMatch = block.match(/\(pbx=<user[^>]*?pwd="([a-fA-F0-9]+)"/);
+          if (!pwdMatch) continue;
+          const encPw = pwdMatch[1];
+          const userPw = rc4DecryptHex(encPw, userPwKey);
+          addRow("Object", user, userPw);
+        }
+
+        document.getElementById('resultSection').style.display = 'block';
+      };
+
+      reader.readAsText(file);
+    }
+  </script>
+</body>
+
+</html>
